@@ -1,41 +1,89 @@
 from django.shortcuts import render
 from django.http import Http404
 from rest_framework.views import APIView
+from rest_framework.generics import GenericAPIView
 from rest_framework.response import Response
 from rest_framework import status
-from account.serializer import RegisterSerializer
+from account.serializer import RegisterSerializer, LoginSerializer, LogoutSerializer, GenerateOTPSerializer
 from account.models import Account
-from rest_framework.authtoken.models import Token
+from django.core.exceptions import ValidationError
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework import serializers
+from rest_framework.schemas import AutoSchema
+from rest_framework.compat import coreapi, coreschema
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
 # Create your views here.
 
 
-class RegisterAccountView(APIView):
+class RegisterAccountView(GenericAPIView):
+
+    serializer_class = RegisterSerializer
 
     def post(self, request, format=None):
-        serializer = RegisterSerializer(data=request.data)
+        serializer = self.serializer_class(data=request.data)
         data = {}
         if serializer.is_valid():
-            account = serializer.save()
+            try:
+                account = serializer.save()
+            except ValidationError as detail:
+                raise serializers.ValidationError(
+                    {"error": detail.message_dict})
+            account_data = serializer.data
             data["response"] = "Successfully registered the new User"
-            data["email"] = account.email
+            data["phone"] = account.phone
             data["username"] = account.username
-            token = Token.objects.get(user=account).key
-            data["Token"] = token
+            account = Account.objects.get(phone=account_data['phone'])
+            refresh_token = RefreshToken.for_user(account)
+            token = {"refresh_token": str(refresh_token),
+                     "access_token": str(refresh_token.access_token)}
+            data["tokens"] = token
             return Response(data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-class GetAuthTokenView(APIView):
+class LoginApiView(GenericAPIView):
+
+    serializer_class = LoginSerializer
+
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class LogoutApiView(GenericAPIView):
+
+    serializer_class = LogoutSerializer
+    permission_classes = [IsAuthenticated, ]
+
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class SampleView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, format=None):
+        return Response({"response": "Success"}, status=status.HTTP_200_OK)
+
+
+class GenerateOTPView(GenericAPIView):
+    serializer_class = GenerateOTPSerializer
 
     def post(self, request, format=None):
-        serializer = RegisterSerializer(data=request.data)
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            return_data = serializer.save()
+        except ValidationError as detail:
+            raise serializers.ValidationError({"error": detail.message_dict})
         data = {}
-        if serializer.is_valid():
-            account = serializer.save()
-            data["response"] = "Successfully registered the new User"
-            data["email"] = account.email
-            data["username"] = account.username
-            token = Token.objects.get(user=account).key
-            data["Token"] = token
-            return Response(data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        data['phone'] = return_data.phone
+        data['password'] = return_data.otp
+
+        return Response(data, status=status.HTTP_201_CREATED)

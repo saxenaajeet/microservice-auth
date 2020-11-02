@@ -23,21 +23,17 @@ class RegisterAccountView(GenericAPIView):
     def post(self, request, format=None):
         serializer = self.serializer_class(data=request.data)
         data = {}
+        account_data = None
         if serializer.is_valid():
             try:
-                account = serializer.save()
+                account_data = serializer.save()
             except ValidationError as detail:
                 raise serializers.ValidationError(
                     {"error": detail.message_dict})
-            account_data = serializer.data
+
             data["response"] = "Successfully registered the new User"
-            data["phone"] = account.phone
-            data["username"] = account.username
-            account = Account.objects.get(phone=account_data['phone'])
-            refresh_token = RefreshToken.for_user(account)
-            token = {"refresh_token": str(refresh_token),
-                     "access_token": str(refresh_token.access_token)}
-            data["tokens"] = token
+            data["phone"] = account_data['phone']
+            data["tokens"] = account_data['tokens']
             return Response(data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

@@ -2,6 +2,7 @@ from rest_framework import serializers
 from account.models import Account, PhoneOtp
 import re
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib import auth
 from rest_framework.exceptions import AuthenticationFailed, NotFound
 from django.core.exceptions import ObjectDoesNotExist
@@ -28,12 +29,14 @@ class RegisterSerializer(serializers.ModelSerializer):
         username = attrs.get('username', '')
         phone = attrs.get('phone', '')
         password = attrs.get('password', '')
-
+        account = None
         try:
             account = Account.objects.get(phone=phone)
-        except account.DoesNotExist:
-            raise serializers.ValidationError(
-                {"phone": "This phone number is already in use."})
+            if account:
+                raise serializers.ValidationError(
+                    {"phone": "This phone number is already in use."})
+        except ObjectDoesNotExist:
+            pass
 
         PHONE_REGEX = re.compile('^\+?1?\d{10,14}$')
         if not PHONE_REGEX.match(phone):
@@ -42,8 +45,10 @@ class RegisterSerializer(serializers.ModelSerializer):
 
         phoneOtp_obj = PhoneOtp.objects.get(phone=phone)
         otp_secret_key = phoneOtp_obj.otp_secret_key
-        logger.info("Secret key for phone # %s is %s", phone, otp_secret_key)
-        otp_utils = OtpUtils(phone, otp_secret_key)
+        count = phoneOtp_obj.count
+        logger.info("Secret key for phone # %s is %s with %s",
+                    phone, otp_secret_key, count)
+        otp_utils = OtpUtils(phone, otp_secret_key, count)
         if password is None:
             raise serializers.ValidationError(
                 {"password": "The register request does not have otp password"})
@@ -70,12 +75,18 @@ class RegisterSerializer(serializers.ModelSerializer):
         password = self.validated_data['password']
         account.set_password(password)
         account.save()
-        return account
+        tokenserializer = MyTokenObtainPairSerializer()
+        return {
+            "username": self.validated_data['username'],
+            "phone": self.validated_data['phone'],
+            "tokens": tokenserializer.get_token(account)
+        }
 
 
 class LoginSerializer(serializers.ModelSerializer):
 
-    phone = serializers.CharField(max_length=15, min_length=10)
+    phone = serializers.CharField(
+        max_length=15, min_length=10, write_only=True)
     password = serializers.CharField(
         max_length=10, min_length=4, write_only=True)
     username = serializers.CharField(max_length=20, read_only=True)
@@ -88,6 +99,7 @@ class LoginSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         phone = attrs.get('phone', '')
         password = attrs.get('password', '')
+        account = None
 
         if not phone:
             raise AuthenticationFailed(
@@ -110,7 +122,8 @@ class LoginSerializer(serializers.ModelSerializer):
 
         if phone_otp_obj:
             otp_secret_key = phone_otp_obj.otp_secret_key
-            otp_utils = OtpUtils(phone, otp_secret_key)
+            count = phone_otp_obj.count
+            otp_utils = OtpUtils(phone, otp_secret_key, count)
             if not otp_utils.verifyOTP(password):
                 raise AuthenticationFailed(
                     "The otp password is expired or invalid")
@@ -118,10 +131,10 @@ class LoginSerializer(serializers.ModelSerializer):
             raise AuthenticationFailed(
                 'Invalid credentials, User has not generated the otp !')
 
+        tokenserializer = MyTokenObtainPairSerializer()
+
         return {
-            "phone": account.phone,
-            "username": account.username,
-            "tokens": account.tokens()
+            "tokens": tokenserializer.get_token(account)
         }
 
 
@@ -160,13 +173,20 @@ class GenerateOTPSerializer(serializers.Serializer):
         try:
             phone_obj = PhoneOtp.objects.get(phone=phone)
         except ObjectDoesNotExist:
-            PhoneOtp.objects.create(
+            phone_obj = PhoneOtp.objects.create(
                 phone=phone, otp_secret_key=pyotp.random_hex())
-            phone_obj = PhoneOtp.objects.get(phone=phone)
+        # phone_obj = PhoneOtp.objects.get(phone=phone)
         phone_obj.count = phone_obj.count + 1
-        phone_obj.save()
+        logger.info(
+            "Phone OTP count is incremented to %s and saved", phone_obj.count)
+        if phone_obj.count > 1:
+            phone_obj.otp_secret_key = pyotp.random_hex()
+            phone_obj.save()
+        else:
+            phone_obj.save()
         otp_secret_key = phone_obj.otp_secret_key
-        otp_utils = OtpUtils(phone=phone, otp_secret_key=otp_secret_key)
+        otp_utils = OtpUtils(
+            phone=phone, otp_secret_key=otp_secret_key, count=phone_obj.count)
         return {"phone": phone, "password": otp_utils.generateOTP()}
 
     def create(self, validated_data):
@@ -174,3 +194,15 @@ class GenerateOTPSerializer(serializers.Serializer):
         phone_obj.otp = self.validated_data['password']
         phone_obj.save()
         return phone_obj
+
+
+class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def get_token(self, account):
+        token = super().get_token(account)
+        # Add custom claims
+        token['username'] = account.username
+        token['is_admin'] = account.is_admin
+        token['is_staff'] = account.is_staff
+        token['is_superuser'] = account.is_superuser
+        return {"refresh_token": str(token),
+                "access_token": str(token.access_token)}
